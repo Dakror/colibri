@@ -1,34 +1,34 @@
 """
-Convertitore GLM-5.2-FP8 -> nostro container int4 (STADIO B).
+GLM-5.2-FP8 -> our int4 container converter (STAGE B).
 
-Strategia DISK-SAFE (richiesta dell'utente): scarica UNO shard (~5 GB), lo converte in
-int4, lo CANCELLA, passa al prossimo. Il disco non si riempie mai: picco = 1 shard + l'output
-int4 che cresce fino a ~372 GB. Controllo di spazio che si ferma se manca margine.
+DISK-SAFE strategy (user request): download ONE shard (~5 GB), convert it to
+int4, DELETE it, move on to the next. The disk never fills up: peak = 1 shard + the int4
+output that grows up to ~372 GB. Space check that stops if there is no margin left.
 
-Cosa fa per ogni tensore:
-  - pesi FP8 (e4m3) con `*.weight_scale_inv`  -> dequant a blocchi 128x128 -> f32
-  - pesi BF16 (norme/embed/lm_head/...)        -> f32
-  poi:
-  - attn/mlp/shared/expert/embed/lm_head -> QUANTIZZATO int4 (o int8) con la STESSA matematica
-    del motore C (np.rint = lrintf, stesse soglie, stesso packing dei nibble) -> token identici
-  - norme / router (mlp.gate.weight) / bias / e_score_correction_bias -> tenuti F32
-  - indexer DSA / layer MTP (78) / shared_head / eh_proj / *norm dell'indexer -> SALTATI
+What it does for each tensor:
+  - FP8 (e4m3) weights with `*.weight_scale_inv`  -> dequant in 128x128 blocks -> f32
+  - BF16 weights (norms/embed/lm_head/...)         -> f32
+  then:
+  - attn/mlp/shared/expert/embed/lm_head -> QUANTIZED int4 (or int8) with the SAME math
+    as the C engine (np.rint = lrintf, same thresholds, same nibble packing) -> identical tokens
+  - norms / router (mlp.gate.weight) / bias / e_score_correction_bias -> kept F32
+  - DSA indexer / MTP layer (78) / shared_head / eh_proj / indexer *norm -> SKIPPED
 
-Output: una dir di safetensors leggibile dal motore C (per ogni peso quantizzato: `nome` U8 =
-dati impacchettati, `nome.qs` F32 = scale per riga).
+Output: a dir of safetensors readable by the C engine (for each quantized weight: `name` U8 =
+packed data, `name.qs` F32 = per-row scales).
 
-USO:
-  # test locale (oracolo tiny, niente download): converte una dir gia' presente
+USAGE:
+  # local test (tiny oracle, no download): converts an already-present dir
   python3 tools/convert_fp8_to_int4.py --indir glm_tiny --outdir glm_tiny_i4 --ebits 4 --io-bits 4
-  # selftest del dequant fp8 (richiede torch)
+  # selftest of the fp8 dequant (requires torch)
   python3 tools/convert_fp8_to_int4.py --selftest
-  # reale: scarica+converte+cancella shard per shard
+  # real: download+convert+delete shard by shard
   python3 tools/convert_fp8_to_int4.py --repo zai-org/GLM-5.2-FP8 --outdir /home/vincenzo/glm52_i4
 """
 import os, sys, glob, json, shutil, argparse
 import numpy as np
 
-# ---------- quantizzazione: identica al C (glm.c) ----------
+# ---------- quantization: identical to the C (glm.c) ----------
 def quant_int8(w, bits):                       # w: [O,I] f32 -> (qbytes U8 [O*I], scale f32 [O])
     qmax = (1 << (bits - 1)) - 1
     amax = np.abs(w).max(axis=1, keepdims=True)
@@ -53,28 +53,25 @@ def quant_int4(w, bits):                        # -> (qbytes U8 [O*ceil(I/2)], s
 
 def quant_int2(w, bits):                        # -> (qbytes U8 [O*ceil(I/4)], scale f32 [O]); 4/byte
     O, I = w.shape
-    qmax = (1 << (bits - 1)) - 1                 # bits=2 -> qmax=1, valori [-2,1]
+    qmax = (1 << (bits - 1)) - 1                 # bits=2 -> qmax=1, values [-2,1]
     amax = np.abs(w).max(axis=1, keepdims=True)
     s = np.maximum(amax / qmax, 1e-8)
     q = np.clip(np.rint(w / s), -2, qmax).astype(np.int32)
     rb = (I + 3) // 4
     out = np.zeros((O, rb), np.uint8)
-    for k in range(4):                           # impacchetta 4 valori per byte (identico a pack_int2 in C)
+    for k in range(4):                           # packs 4 values per byte (identical to pack_int2 in C)
         vk = q[:, k::4]
         out[:, :vk.shape[1]] |= ((vk + 2).astype(np.uint8) << (k * 2))
     return out.reshape(-1), s[:, 0].astype(np.float32)
 
 # ---------- NVFP4 (modelopt) : LUT e2m1 ----------
-# FP4 e2m1 = 1 sign + 2 exp + 1 mantissa. 16 codici, magnitudini {0,.5,1,1.5,2,3,4,6}.
-# Bit 3 = segno. Ordine impacchettato (compressed_tensors/vLLM): nibble BASSO = elemento
-# pari, nibble ALTO = elemento dispari. LUT verificata 1:1 con ml_dtypes.float4_e2m1fn.
-# EN: FP4 e2m1 = 1 sign + 2 exp + 1 mantissa. 16 codes, magnitudes {0,.5,1,1.5,2,3,4,6}.
-# EN: bit 3 = sign. Packed order (compressed_tensors/vLLM): LOW nibble = even element,
-# EN: HIGH nibble = odd element. LUT verified 1:1 against ml_dtypes.float4_e2m1fn.
+# FP4 e2m1 = 1 sign + 2 exp + 1 mantissa. 16 codes, magnitudes {0,.5,1,1.5,2,3,4,6}.
+# Bit 3 = sign. Packed order (compressed_tensors/vLLM): LOW nibble = even element,
+# HIGH nibble = odd element. LUT verified 1:1 against ml_dtypes.float4_e2m1fn.
 _E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
          -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
 
-# ---------- classificazione dei tensori ----------
+# ---------- tensor classification ----------
 def layer_idx(name):
     p = name.split(".")
     if len(p) > 2 and p[0] == "model" and p[1] == "layers":
@@ -83,29 +80,28 @@ def layer_idx(name):
     return -1
 
 def classify(name, n_layers, keep_mtp=False, keep_idx=False):
-    if name.endswith("_scale_inv"): return "consumed"   # FP8 base: gestito col suo peso
-    # NVFP4 (modelopt): i sidecar delle scale sono consumati insieme al loro .weight U8.
-    # EN: NVFP4 (modelopt): scale sidecars are consumed together with their U8 .weight.
+    if name.endswith("_scale_inv"): return "consumed"   # FP8 base: handled with its weight
+    # NVFP4 (modelopt): scale sidecars are consumed together with their U8 .weight.
     if name.endswith((".weight_scale", ".weight_scale_2", ".input_scale")): return "consumed"
     li = layer_idx(name)
     if keep_idx:
-        # modalita' --indexer: SOLO i pesi del DSA lightning indexer dei layer principali
+        # --indexer mode: ONLY the DSA lightning indexer weights of the main layers
         if li < 0 or li >= n_layers or "indexer" not in name: return "skip"
         if name.endswith("norm.weight"): return "f32"
-        return "q"                                       # int8 consigliato (--ebits 8): pesi di scoring
+        return "q"                                       # int8 recommended (--ebits 8): scoring weights
     if keep_mtp:
-        if li != n_layers: return "skip"                 # solo il layer MTP
-        if "indexer" in name: return "skip"              # il DSA indexer resta un no-op
+        if li != n_layers: return "skip"                 # only the MTP layer
+        if "indexer" in name: return "skip"              # the DSA indexer stays a no-op
     else:
-        if li >= n_layers: return "skip"                 # layer MTP (78)
+        if li >= n_layers: return "skip"                 # MTP layer (78)
         if any(k in name for k in ["indexer", "indexers_proj", "eh_proj",
                                     "enorm", "hnorm", "shared_head"]): return "skip"
     if name.endswith("e_score_correction_bias"): return "f32"
-    if name.endswith("mlp.gate.weight"): return "f32"    # router (NON gate_proj)
+    if name.endswith("mlp.gate.weight"): return "f32"    # router (NOT gate_proj)
     if name.endswith("norm.weight") or name == "model.norm.weight": return "f32"
     if name in ("model.embed_tokens.weight", "lm_head.weight"): return "io"
-    if ".mlp.experts." in name and name.endswith(".weight"): return "x"  # expert ROUTED (streaming)
-    if name.endswith(".weight"): return "q"              # attn/dense-mlp/shared (residente)
+    if ".mlp.experts." in name and name.endswith(".weight"): return "x"  # ROUTED expert (streaming)
+    if name.endswith(".weight"): return "q"              # attn/dense-mlp/shared (resident)
     return "f32"
 
 # ---------- dequant NVFP4 (modelopt) di UN tensore expert -> f32 [O,I] ----------

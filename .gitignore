@@ -1,4 +1,4 @@
-# ambienti python / cache
+# python environments / cache
 c/mio_env/
 __pycache__/
 **/__pycache__/
@@ -9,7 +9,7 @@ web/*.tsbuildinfo
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 
-# binari compilati (si rigenerano con make / coli build)
+# compiled binaries (regenerated with make / coli build)
 c/glm
 c/glm.exe
 c/olmoe
@@ -32,7 +32,7 @@ c/tests/test_tier.exe
 c/tests/test_grammar
 c/tests/test_grammar.exe
 
-# oracoli tiny generati (make_glm_oracle.py) e dati benchmark scaricati
+# generated tiny oracles (make_glm_oracle.py) and downloaded benchmark data
 c/glm_tiny/
 c/glm_tiny_i2/
 c/glm_tiny_i4/
@@ -40,12 +40,12 @@ c/glm_tiny_mix/
 c/glm_bench_medium/
 c/bench/
 
-# pesi modello / artefatti di run
+# model weights / run artifacts
 *.safetensors
 stats*.txt
 *.log
 
-# script di ricerca stadio-0 (esperimenti locali, non parte del motore)
+# stage-0 research scripts (local experiments, not part of the engine)
 /engine.py
 /run.py
 /validate_ref.py

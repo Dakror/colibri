@@ -32,9 +32,9 @@ endif
 
 ifneq (,$(DARWIN))
 # --- macOS / Apple Silicon ---
-# Apple clang non include il runtime OpenMP: se c'e' libomp di Homebrew lo usa
-# (brew install libomp), altrimenti compila single-thread (i pragma omp sono ignorati).
-# Niente -march: su arm64 NEON e' baseline (i kernel __ARM_NEON si attivano da soli).
+# Apple clang does not include the OpenMP runtime: if Homebrew's libomp is present it uses it
+# (brew install libomp), otherwise it builds single-thread (the omp pragmas are ignored).
+# No -march: on arm64 NEON is baseline (the __ARM_NEON kernels enable themselves).
 CC      = clang
 OMPDIR := $(shell brew --prefix libomp 2>/dev/null)
 ifneq ($(OMPDIR),)
@@ -51,7 +51,7 @@ EXE     =
 else ifneq ($(IS_WIN),)
 # --- Windows 11 x86-64 (MinGW-w64 / MSYS2) ---
 # GCC + libgomp + winpthreads: pthread, OpenMP, clock_gettime, opendir/readdir,
-# AVX2 intrinsics - tutto gratis, nessun porting.
+# AVX2 intrinsics - all for free, no porting.
 # ARCH default = x86-64-v3 (portable binary with AVX2). For max speed on THIS
 # machine use ARCH=native: on AVX-VNNI CPUs (Intel Alder Lake+, Meteor Lake+)
 # it also unlocks the 128-bit VPDPBUSD int8/int4 dot kernel (dot_i8i8/dot_i4i8),
@@ -74,11 +74,11 @@ CFLAGS  = -O3 -mcpu=$(ARCH) -fopenmp -Wall -Wextra -Wno-unused-parameter -Wno-mi
 LDFLAGS = -lm -fopenmp
 EXE     =
 else
-# --- Linux x86-64 (percorso originale, invariato) ---
+# --- Linux x86-64 (original path, unchanged) ---
 CC      = gcc
-# ARCH=native -> ottimizzato per QUESTA macchina (default, piu' veloce).
-# ARCH=x86-64-v3 -> binario PORTABILE su qualsiasi x86-64 moderno con AVX2 (per distribuire).
-# ARCH=x86-64 -> massima compatibilita' (niente AVX2: usa il path scalare di fallback).
+# ARCH=native -> optimized for THIS machine (default, fastest).
+# ARCH=x86-64-v3 -> PORTABLE binary on any modern x86-64 with AVX2 (for distribution).
+# ARCH=x86-64 -> maximum compatibility (no AVX2: uses the scalar fallback path).
 ARCH   ?= native
 CFLAGS  = -O3 -march=$(ARCH) -fopenmp -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function
 LDFLAGS = -lm -fopenmp
@@ -201,7 +201,7 @@ cuda-bench: backend_cuda.cu backend_cuda.h tests/bench_tensor_core.cu
 olmoe$(EXE): olmoe.c st.h json.h compat.h
 	$(CC) $(CFLAGS) olmoe.c -o olmoe$(EXE) $(LDFLAGS)
 
-# binario portabile da distribuire su altre macchine x86-64
+# portable binary to distribute to other x86-64 machines
 portable:
 	$(MAKE) glm$(EXE) ARCH=x86-64-v3
 
